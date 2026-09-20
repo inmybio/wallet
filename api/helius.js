@@ -59,10 +59,22 @@ async function solPrice() {
 async function buyValueUsd(event) {
   const swap = event?.events?.swap ?? {};
 
+  // SOL sent as native SOL
   const native = Number(swap?.nativeInput?.amount ?? 0) / 1e9;
-  if (native > 0) return native * await solPrice();
+  if (native > 0) {
+    return native * await solPrice();
+  }
 
-  const stableInput = (swap?.tokenInputs ?? []).find(
+  const inputs = swap?.tokenInputs ?? [];
+
+  // SOL sent as wrapped SOL
+  const solInput = inputs.find((input) => input.mint === SOL_MINT);
+  if (solInput) {
+    return (tokenAmount(solInput) / 1e9) * await solPrice();
+  }
+
+  // USDC / USDT sent as the buy currency
+  const stableInput = inputs.find(
     (input) =>
       QUOTE_MINTS.has(input.mint) &&
       input.mint !== SOL_MINT
@@ -192,7 +204,7 @@ export default async function handler(req, res) {
   const results = [];
 
   for (const event of events) {
-    // TEMPORARY DEBUG: proves Discord receives each real Helius webhook.
+    // Temporary debug messages. Remove later once working.
     await discordMessage(
       `✅ Webhook received\nType: **${event.type ?? "unknown"}**\nSignature: \`${event.signature ?? "unknown"}\``
     );
@@ -224,6 +236,7 @@ export default async function handler(req, res) {
     }
 
     const token = await tokenDetails(bought.mint);
+
     const narrative = await researchOnX({
       mint: bought.mint,
       token,
