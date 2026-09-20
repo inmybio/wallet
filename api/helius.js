@@ -20,6 +20,16 @@ function tokenAmount(transfer) {
   );
 }
 
+function findBoughtToken(event, wallet) {
+  const outputs = event?.events?.swap?.tokenOutputs ?? event?.tokenTransfers ?? [];
+
+  return outputs.find((transfer) =>
+    !QUOTE_MINTS.has(transfer.mint) &&
+    (transfer.userAccount === wallet || transfer.toUserAccount === wallet) &&
+    tokenAmount(transfer) > 0
+  );
+}
+
 async function discordMessage(content) {
   const response = await fetch(env("DISCORD_WEBHOOK_URL"), {
     method: "POST",
@@ -33,59 +43,6 @@ async function discordMessage(content) {
   if (!response.ok) {
     throw new Error(`Discord delivery failed (${response.status})`);
   }
-}
-
-function findBoughtToken(event, wallet) {
-  const outputs = event?.events?.swap?.tokenOutputs ?? event?.tokenTransfers ?? [];
-
-  return outputs.find((transfer) =>
-    !QUOTE_MINTS.has(transfer.mint) &&
-    (transfer.userAccount === wallet || transfer.toUserAccount === wallet) &&
-    tokenAmount(transfer) > 0
-  );
-}
-
-async function solPrice() {
-  const response = await fetch(
-    "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
-    { headers: { accept: "application/json" } }
-  );
-
-  if (!response.ok) throw new Error("Could not price SOL");
-
-  return Number((await response.json())?.solana?.usd);
-}
-
-async function buyValueUsd(event) {
-  const swap = event?.events?.swap ?? {};
-
-  // SOL sent as native SOL
-  const native = Number(swap?.nativeInput?.amount ?? 0) / 1e9;
-  if (native > 0) {
-    return native * await solPrice();
-  }
-
-  const inputs = swap?.tokenInputs ?? [];
-
-  // SOL sent as wrapped SOL
-  const solInput = inputs.find((input) => input.mint === SOL_MINT);
-  if (solInput) {
-    return (tokenAmount(solInput) / 1e9) * await solPrice();
-  }
-
-  // USDC / USDT sent as the buy currency
-  const stableInput = inputs.find(
-    (input) =>
-      QUOTE_MINTS.has(input.mint) &&
-      input.mint !== SOL_MINT
-  );
-
-  if (stableInput) {
-    const decimals = Number(stableInput?.rawTokenAmount?.decimals ?? 6);
-    return tokenAmount(stableInput) / 10 ** decimals;
-  }
-
-  return 0;
 }
 
 async function tokenDetails(mint) {
@@ -109,13 +66,12 @@ async function tokenDetails(mint) {
   };
 }
 
-async function researchOnX({ mint, token, buyUsd }) {
+async function researchOnX({ mint, token }) {
   const prompt = `Research this Solana memecoin on X only.
 
 CA: ${mint}
 Name: ${token.name ?? "unknown"}
 Ticker: ${token.symbol ?? "unknown"}
-Wallet buy size: $${buyUsd.toFixed(2)}
 
 Search the exact CA first. Then search the name and ticker only when it clearly refers to this project.
 
@@ -158,10 +114,9 @@ Do not invent facts. Explicitly say when there is little or no X evidence. Keep 
   );
 }
 
-async function postNarrative({ mint, token, buyUsd, narrative }) {
+async function postNarrative({ mint, token, narrative }) {
   const lines = [
-    `**Wallet buy detected — $${token.symbol ?? "TOKEN"}**`,
-    `Bought: **$${buyUsd.toFixed(2)}**`,
+    `**Wallet BUY detected — $${token.symbol ?? "TOKEN"}**`,
     `CA: \`${mint}\``,
     token.marketCap
       ? `MC: **$${Math.round(token.marketCap).toLocaleString()}**`
@@ -199,61 +154,34 @@ export default async function handler(req, res) {
   }
 
   const wallet = env("WATCHED_WALLET");
-  const minimum = Number(process.env.MIN_BUY_USD ?? 5);
   const events = Array.isArray(req.body) ? req.body : [req.body];
   const results = [];
 
   for (const event of events) {
-    // Temporary debug messages. Remove later once working.
-    await discordMessage(
-      `✅ Webhook received\nType: **${event.type ?? "unknown"}**\nSignature: \`${event.signature ?? "unknown"}\``
-    );
-
-    if (event.type !== "SWAP") {
-      await discordMessage("Skipped: transaction is not a SWAP.");
-      continue;
-    }
+    if (event.type !== "SWAP") continue;
 
     if (!event.accountData?.some((account) => account.account === wallet)) {
-      await discordMessage("Skipped: watched wallet was not found in this event.");
       continue;
     }
 
     const bought = findBoughtToken(event, wallet);
-
-    if (!bought) {
-      await discordMessage("Skipped: could not identify the purchased token.");
-      continue;
-    }
-
-    const buyUsd = await buyValueUsd(event).catch(() => 0);
-
-    if (buyUsd < minimum) {
-      await discordMessage(
-        `Skipped: detected buy value was $${buyUsd.toFixed(2)}, below $${minimum}.`
-      );
-      continue;
-    }
+    if (!bought) continue;
 
     const token = await tokenDetails(bought.mint);
-
     const narrative = await researchOnX({
       mint: bought.mint,
       token,
-      buyUsd,
     });
 
     await postNarrative({
       mint: bought.mint,
       token,
-      buyUsd,
       narrative,
     });
 
     results.push({
       mint: bought.mint,
       symbol: token.symbol,
-      buyUsd,
     });
   }
 
