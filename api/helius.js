@@ -20,16 +20,6 @@ function tokenAmount(transfer) {
   );
 }
 
-function findBoughtToken(event, wallet) {
-  const outputs = event?.events?.swap?.tokenOutputs ?? event?.tokenTransfers ?? [];
-
-  return outputs.find((transfer) =>
-    !QUOTE_MINTS.has(transfer.mint) &&
-    (transfer.userAccount === wallet || transfer.toUserAccount === wallet) &&
-    tokenAmount(transfer) > 0
-  );
-}
-
 async function discordMessage(content) {
   const response = await fetch(env("DISCORD_WEBHOOK_URL"), {
     method: "POST",
@@ -43,6 +33,16 @@ async function discordMessage(content) {
   if (!response.ok) {
     throw new Error(`Discord delivery failed (${response.status})`);
   }
+}
+
+function findBoughtToken(event, wallet) {
+  const outputs = event?.events?.swap?.tokenOutputs ?? event?.tokenTransfers ?? [];
+
+  return outputs.find((transfer) =>
+    !QUOTE_MINTS.has(transfer.mint) &&
+    (transfer.userAccount === wallet || transfer.toUserAccount === wallet) &&
+    tokenAmount(transfer) > 0
+  );
 }
 
 async function tokenDetails(mint) {
@@ -158,31 +158,51 @@ export default async function handler(req, res) {
   const results = [];
 
   for (const event of events) {
-    if (event.type !== "SWAP") continue;
+    // This should appear for every Helius webhook received.
+    await discordMessage(
+      `✅ Webhook received\nType: **${event.type ?? "unknown"}**\nSignature: \`${event.signature ?? "unknown"}\``
+    );
+
+    if (event.type !== "SWAP") {
+      await discordMessage("Skipped: transaction was not a SWAP.");
+      continue;
+    }
 
     if (!event.accountData?.some((account) => account.account === wallet)) {
+      await discordMessage("Skipped: watched wallet was not found.");
       continue;
     }
 
     const bought = findBoughtToken(event, wallet);
-    if (!bought) continue;
+
+    if (!bought) {
+      await discordMessage("Skipped: could not find the token purchased in this swap.");
+      continue;
+    }
 
     const token = await tokenDetails(bought.mint);
-    const narrative = await researchOnX({
-      mint: bought.mint,
-      token,
-    });
 
-    await postNarrative({
-      mint: bought.mint,
-      token,
-      narrative,
-    });
+    try {
+      const narrative = await researchOnX({
+        mint: bought.mint,
+        token,
+      });
 
-    results.push({
-      mint: bought.mint,
-      symbol: token.symbol,
-    });
+      await postNarrative({
+        mint: bought.mint,
+        token,
+        narrative,
+      });
+
+      results.push({
+        mint: bought.mint,
+        symbol: token.symbol,
+      });
+    } catch (error) {
+      await discordMessage(
+        `⚠️ Buy found: \`${bought.mint}\`\nBut X analysis failed: ${error.message}`
+      );
+    }
   }
 
   return res.status(200).json({ ok: true, researched: results });
